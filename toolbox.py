@@ -2,14 +2,22 @@
 import numpy as np
 import xarray as xr
 from scipy.optimize import fsolve
+from scipy.special import gamma
 
 ### Toolbox of atmospheric science/meterological funcations ###
-## Compiled by Walter Shen
-# updated October 2025
+## Compiled by Walter Shen ##
+# Updated 2026-02
 
-#########################
-####### functions #######
-#########################
+##############################################
+####### General Meteological Constants #######
+##############################################
+
+# todo add some basic constants
+
+
+##############################################
+####### General Meteological Functions #######
+##############################################
 
 def helloWorld():
     print("hello world!")
@@ -354,6 +362,10 @@ def decode_xyz(xyz):
     return x, y, z
 
 
+##############################################
+####### Statistical Functions ################
+##############################################
+
 def bivariate_fit(xi, yi, dxi, dyi, ri=0.0, b0=1.0, maxIter=1e6):
     ### York Fit function
     # https://gist.github.com/mikkopitkanen/ce9cd22645a9e93b6ca48ba32a3c85d0
@@ -478,3 +490,180 @@ def bivariate_fit(xi, yi, dxi, dyi, ri=0.0, b0=1.0, maxIter=1e6):
         print("bivariate_fit.py exceeded maximum number of iterations, " +
               "maxIter = {:}".format(maxIter))
         return np.nan, np.nan, np.nan, np.nan
+    
+    
+##############################################
+####### SAM-specific Functions ###############
+##############################################
+
+def partition_n(T):
+    """
+    Calculate the hydrometeor partition fraction (non-precipitating condensate)
+    
+    Parameters:
+    T (float): Temperature in Kelvin
+    
+    Returns:
+    float: Hydrometeor partition fraction
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    ω_n(T) = max(0, min(1, (T - T_00n)/(T_0n - T_00n)))
+    """
+    T_00n = 253.16
+    T_0n  = 273.16
+    return np.maximum(0.0, np.minimum(1.0, (T - T_00n) / (T_0n - T_00n)))
+
+def partition_p(T):
+    """
+    Calculate the hydrometeor partition fraction (precipitating water)
+    
+    Parameters:
+    T (float): Temperature in Kelvin
+    
+    Returns:
+    float: Hydrometeor partition fraction
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    ω_p(T) = max(0, min(1, (T - T_00p)/(T_0p - T_00p)))
+    """
+    T_00p = 268.16
+    T_0p  = 283.16
+    return np.maximum(0.0, np.minimum(1.0, (T - T_00p) / (T_0p - T_00p)))
+
+def partition_g(T):
+    """
+    Calculate the hydrometeor partition fraction (graupel)
+    
+    Parameters:
+    T (float): Temperature in Kelvin
+    
+    Returns:
+    float: Hydrometeor partition fraction
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    ω_g(T) = max(0, min(1, (T - T_00g)/(T_0g - T_00g)))
+    """
+    T_00g = 223.16
+    T_0g  = 283.16
+    return np.maximum(0.0, np.minimum(1.0, (T - T_00g) / (T_0g - T_00g)))
+
+def dq_pdt_auto_cloud(q_c):
+    """
+    Calculate the source of precipitating water due to autoconversion of cloud water into precip
+    described following the original Kessler formulation
+    
+    Parameters:
+    q_c (float): cloud water (kg/kg)
+    
+    Returns:
+    float: dq_p/dt_auto, source of precipitating water due to autoconversion of cloud water into rain
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    dq_pdt_auto = max[0, alpha(q_c-q_co)0]
+    """
+    alpha = 0.001 # autoconversion rate, s-1
+    q_co = 1e-3 # threshold cloud water for autoconversion, kg/kg
+
+    return np.maximum(0, alpha * (q_c - q_co))
+
+def dq_pdt_auto_ice(q_i, T):
+    """
+    Calculate the source of precipitating water due to autoconversion of ice water into precip
+    described following the original Kessler formulation
+    
+    Parameters:
+    q_i (float): icea water (kg/kg)
+    T (float): temperature (K)
+    
+    Returns:
+    float: dq_p/dt_auto, source of precipitating water due to autoconversion of ice water into precip
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    eqn (A31)
+    """
+    beta = 0.001 # ice aggregation rate, s-1
+    q_io = 1e-4 # threshold ice for autoconversion, kg/kg
+
+    return np.maximum(0, beta * np.exp(0.025*(T-273.16)) * (q_i - q_io))
+
+def dq_rdt_accr(q_l, q_r, RHO):
+    """
+    Expression for the rate of change of precipitating type m mixing ratio due to collection of condensate type l
+    
+    Parameters:
+    q_l (float): liquid nonprecip (kg/kg)
+    q_r (float): rain (kg/kg)
+    RHO (float): Air density (kg/m^3).
+    
+    Returns:
+    float: dq_rdt_accr
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    eqn (A28)
+    """
+    
+    # --- rain parameters ---
+    a_r   = 842.0     # fall-speed coefficient for rain
+    b_r   = 0.8       # fall-speed exponent for rain
+    N0r   = 8.0e6     # intercept parameter for rain (m^-4)
+    E_rl  = 1.0       # collection efficiency (rain collecting liquid)
+    rho_r = 1000.0    # density of rain water (kg/m^3)
+    rho_o = 1.29      # reference air density (kg/m^3)
+
+    # exponent (3 + b_m)/4
+    pow1 = (3.0 + b_r) / 4.0
+
+    # Eq (A29): A_ar (using m=r, l=liquid)
+    A_ar = (np.pi / 4.0) * a_r * N0r * E_rl * gamma(3.0 + b_r) \
+           * (rho_o / RHO) ** 0.5 \
+           * (RHO / (np.pi * rho_r * N0r)) ** pow1
+
+    # Eq (A28)
+    dq_rdt_accr = A_ar * q_l * np.maximum(q_r, 0.0) ** pow1
+    return dq_rdt_accr 
+
+def dq_rdt_evap(T, QR, QV, P, RHO):
+    """
+    Calculate the rate of change of precipitating water type (r)ain mixing ratio due to evaporation
+    
+    Parameters:
+    T, QR, QV, P (hPa), RHO (kg/m3)
+    
+    Returns:
+    float: dq_rdt_evap, rate of change of precipitating water type (r)ain mixing ratio due to evaporation
+    
+    Notes:
+    Following SAM model paper Khairoutdinov and Randall (2003)
+    eqn (A24)
+    """
+    C_r = 1 # rain shape factor
+    N_0r = 8e6 # intercept parameter for rain, m-4
+    L_c = 2.5104e6 # latent heat condensation J/kg 
+    K_a = 2.4e-2 # thermal conductivity of air 0C, J M /k/s
+    R_v = 461 # specific gas constant water vapor, J/kg/K
+    D_a = 2.210e-5 # diffusion coeff water vapor 0C, m2/s
+    
+    L = L_c
+    A = L/(K_a*T) * (L/(R_v*T)-1)
+    R = 287 # spcific gas constant for air J/kg/K
+    B = R_v*T / (D_a * 100*es(T))
+    
+    a_fr = 0.78 #Constant in ventilation factor for rain
+    b_fr = 0.31 #Constant in ventilation factor for rain
+    rho_r = 1000 # density of rain kg/m3
+    a_r = 842 # Constant in fall speed formula for rain
+    b_r = 0.8 # Exponent in fall speed formula for rai
+    mu = 1.717e-5 # Dynamic viscosity of air at 0C
+    rho_o = 1.29 # reference air density kg/m3
+    
+    A_er = a_fr * (RHO / np.pi/ rho_r / N_0r) ** 0.5
+    B_er = b_fr * (RHO * a_r / mu) ** 0.5 * gamma((5+b_r)/2) * (rho_o/RHO)**0.25 * (RHO/np.pi/rho_r/N_0r)**((5+b_r)/8)
+    S = QV/q_sat(T, P)
+    
+    return 2 * np.pi * C_r * N_0r /(RHO*(A+B)) * (A_er * QR**0.5 + B_er * QR**((5+b_r)/8)) * (S-1)
